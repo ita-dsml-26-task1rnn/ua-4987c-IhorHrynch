@@ -108,7 +108,23 @@ def make_windows(series: np.ndarray, window: int) -> Tuple[np.ndarray, np.ndarra
     Keras RNN layers expect inputs shaped as (batch, time, features).
     Here features=1 because the time series is univariate.
     """
-    raise NotImplementedError
+    series = np.asarray(series, dtype=np.float32).reshape(-1)
+    if series.ndim != 1:
+        raise ValueError("series must be one-dimensional")
+    if not np.isfinite(series).all():
+        raise ValueError("series must contain only finite values")
+    if not isinstance(window, int) or not (1 <= window < len(series)):
+        raise ValueError("window must satisfy 1 <= window < len(series)")
+
+    n_samples = len(series) - window
+    X = np.empty((n_samples, window, 1), dtype=np.float32)
+    y = np.empty((n_samples, 1), dtype=np.float32)
+
+    for i in range(n_samples):
+        X[i, :, 0] = series[i : i + window]
+        y[i, 0] = series[i + window]
+
+    return X, y
 
 
 def time_split(
@@ -148,7 +164,30 @@ def time_split(
     - Do NOT shuffle.
     - The split is performed on already-windowed samples.
     """
-    raise NotImplementedError
+    if len(X) != len(y):
+        raise ValueError("X and y must have the same number of samples")
+    if len(X) < 3:
+        raise ValueError("need at least 3 samples to create train/val/test splits")
+    if not (0.0 < train_frac < 1.0) or not (0.0 <= val_frac < 1.0):
+        raise ValueError("train_frac and val_frac must be within valid bounds")
+    if train_frac + val_frac >= 1.0:
+        raise ValueError("train_frac + val_frac must be less than 1.0")
+
+    n_samples = len(X)
+    train_end = int(n_samples * train_frac)
+    val_end = train_end + int(n_samples * val_frac)
+
+    if train_end == 0 or val_end <= train_end or val_end >= n_samples:
+        raise ValueError("each split must contain at least one sample")
+
+    X_train, y_train = X[:train_end], y[:train_end]
+    X_val, y_val = X[train_end:val_end], y[train_end:val_end]
+    X_test, y_test = X[val_end:], y[val_end:]
+
+    if len(X_train) == 0 or len(X_val) == 0 or len(X_test) == 0:
+        raise ValueError("each split must contain at least one sample")
+
+    return (X_train, y_train), (X_val, y_val), (X_test, y_test)
 
 
 def build_model(
@@ -186,7 +225,30 @@ def build_model(
     -----
     You may change the architecture slightly, but keep I/O shapes the same.
     """
-    raise NotImplementedError
+    if not isinstance(window, int) or window <= 0:
+        raise ValueError("window must be a positive integer")
+    if n_units <= 0 or dense_units <= 0:
+        raise ValueError("n_units and dense_units must be positive")
+    if not (0.0 <= dropout < 1.0):
+        raise ValueError("dropout must be in [0, 1)")
+    if learning_rate <= 0:
+        raise ValueError("learning_rate must be positive")
+
+    model = tf.keras.Sequential(
+        [
+            tf.keras.layers.Input(shape=(window, 1)),
+            tf.keras.layers.LSTM(n_units),
+            tf.keras.layers.Dropout(dropout),
+            tf.keras.layers.Dense(dense_units, activation="relu"),
+            tf.keras.layers.Dense(1),
+        ]
+    )
+    model.compile(
+        optimizer=tf.keras.optimizers.Adam(learning_rate=learning_rate),
+        loss="mse",
+        metrics=[tf.keras.metrics.MeanAbsoluteError(name="mae")],
+    )
+    return model
 
 
 def train_model(
@@ -245,7 +307,38 @@ def train_model(
     - Prefer using EarlyStopping (optional) to reduce overfitting.
     - Keep the function deterministic as much as possible.
     """
-    raise NotImplementedError
+    tf.keras.utils.set_random_seed(seed)
+    try:
+        tf.config.experimental.enable_op_determinism()
+    except Exception:
+        pass
+
+    X, y = make_windows(series, window)
+    (X_train, y_train), (X_val, y_val), (X_test, y_test) = time_split(
+        X, y, train_frac=train_frac, val_frac=val_frac
+    )
+
+    model = build_model(window=window)
+    callbacks = [
+        tf.keras.callbacks.EarlyStopping(
+            monitor="val_loss",
+            patience=5,
+            restore_best_weights=True,
+        )
+    ]
+
+    history = model.fit(
+        X_train,
+        y_train,
+        validation_data=(X_val, y_val),
+        epochs=epochs,
+        batch_size=batch_size,
+        shuffle=False,
+        verbose=verbose,
+        callbacks=callbacks,
+    )
+
+    return model, X_test, y_test, history
 
 
 # ----------------------------
